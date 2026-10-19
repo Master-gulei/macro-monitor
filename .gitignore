@@ -1,0 +1,16 @@
+data/*.db
+data/*.db-*
+data/*.lock
+data/*.log
+data/cache/
+out/
+__pycache__/
+*.pyc
+
+# 本机私有配置：API Key 等敏感值，绝不入库
+local_config.json
+
+# 测试只保留在本地（仓库只推核心源码，如需开源测试再移除本行）
+tests/
+run_tests.py
+test_report.txt

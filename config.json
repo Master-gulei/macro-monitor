@@ -1,0 +1,62 @@
+{
+  "site": {
+    "name": "宏观经济主要指标AI解读",
+    "history_months": 24,
+    "chart_months": 24
+  },
+  "safety": {
+    "minimum_request_interval_seconds": 3,
+    "automatic_requests_per_month": 400,
+    "allowed_hosts": [
+      "data.stats.gov.cn",
+      "www.stats.gov.cn",
+      "datacenter-web.eastmoney.com",
+      "www.customs.gov.cn",
+      "tjs.customs.gov.cn",
+      "www.mohrss.gov.cn",
+      "chrm.mohrss.gov.cn",
+      "www.scio.gov.cn"
+    ],
+    "tls_verify_exceptions": [
+      "www.stats.gov.cn",
+      "www.customs.gov.cn",
+      "tjs.customs.gov.cn",
+      "www.scio.gov.cn"
+    ]
+  },
+  "nbs": {
+    "base_url": "https://data.stats.gov.cn",
+    "query_months": 60
+  },
+  "eastmoney": {
+    "base_url": "https://datacenter-web.eastmoney.com",
+    "page_size": 120
+  },
+  "statsweb": {
+    "base_url": "https://www.stats.gov.cn",
+    "list_path": "/sj/zxfb/",
+    "hjd_list_path": "/sj/zxfbhjd/",
+    "max_list_pages": 3
+  },
+  "mohrss": {
+    "base_url": "https://www.mohrss.gov.cn"
+  },
+  "customs": {
+    "kuaixun_index": "https://www.customs.gov.cn/customs/302249/zfxxgk/2799825/302274/index.html",
+    "trade_index_page": "https://tjs.customs.gov.cn/tjs/3107232/myzs/index.html"
+  },
+  "llm": {
+    "provider": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "api_key": "",
+    "timeout_seconds": 600,
+    "thinking_disabled": true,
+    "monthly_token_budget": 200000
+  },
+  "pipeline": {
+    "interpret_min_months": 3,
+    "light_threshold_note": "红绿灯阈值为经验性设定，仅作视觉提示，以 AI 解读为准"
+  }
+}
