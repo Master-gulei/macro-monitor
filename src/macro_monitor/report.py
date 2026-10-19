@@ -752,7 +752,7 @@ def render_report(db: Database, config: Dict[str, Any], today: Optional[Any] = N
 <script>{chart_js}</script>
 </body>
 </html>""".format(
-        name=esc(site.get("name", "宏观经济主要指标AI解读")),
+        name=esc(site.get("name", "宏观经济主要指标月度看板")),
         date=now.strftime("%Y-%m-%d"),
         favicon=_FAVICON, style=_STYLE, logo=_LOGO_SVG,
         covered=covered, total=total, periods=periods,
