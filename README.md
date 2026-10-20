@@ -22,7 +22,7 @@
    ```bat
    run.bat run --dry-run
    ```
-3. ▶️ **运行**（Windows 双击 `run.bat`，Linux/macOS 用 `./run.sh run`）：
+3. ▶️ **运行**（Windows 双击 `run.bat` 即执行完整流水线并停窗显示结果，Linux/macOS 用 `./run.sh run`）：
    ```bat
    run.bat run
    ```
@@ -38,6 +38,7 @@ Linux/macOS 可用 crontab 定时运行（`crontab -e` 添加，每 10 天一次
 
 | 命令 | 说明 |
 |---|---|
+| 双击 `run.bat`（无参数） | 等价 `run.bat run`：执行完整月度流水线，结束后窗口停住显示结果（同月重复运行不重复消费） |
 | `run.bat run` | 完整月度流水线：抓取 → 房价聚合 → AI 解读 → 看板 |
 | `run.bat run --force` | 忽略"本月已抓取"标记，强制重新抓取 |
 | `run.bat run --refresh-ai` | 强制重新生成 AI 解读 |
@@ -70,7 +71,7 @@ macro-monitor/
 │                            # statsweb_house/profit/news/unemp/pmi.py Mixin + statsweb_patterns.py 共享正则）、
 │                            # eastmoney.py（数据中心兜底）、customs.py（海关总署）、mohrss.py（人社部）
 ├── config.json              # 公开配置（数据源、预算、安全白名单、out/ 保留份数）
-├── run.bat                  # Windows 入口（chcp 65001 + PYTHONPATH）
+├── run.bat                  # Windows 入口（chcp 65001 + PYTHONPATH；双击无参数默认执行完整流水线）
 ├── run.sh                   # Linux/macOS 入口（bash + PYTHONPATH）
 ├── README.md / DESIGN.md    # 使用说明 / 设计文档（含官方数据源清单）
 └── 仅本地目录（已被 .gitignore 排除，不入仓库）：
