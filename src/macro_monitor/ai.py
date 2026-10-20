@@ -33,6 +33,9 @@ OVERALL_SYSTEM = """你是严谨、克制的中文宏观经济分析师。你会
 # 瞬时错误（429/5xx/网络中断）重试一次的退避秒数
 _RETRY_BACKOFF_SECONDS = 2.0
 
+# 单次响应体上限：与 SafeFetcher 对齐，防止异常上游返回超大响应耗尽内存。
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
 
 class LLMUnavailable(RuntimeError):
     pass
@@ -128,11 +131,18 @@ class LLMClient:
         while True:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    value = json.loads(response.read().decode("utf-8", errors="replace"))
+                    # 限量读取：超大响应先拒绝而不是先完整入内存
+                    raw = response.read(_MAX_RESPONSE_BYTES + 1)
+                    if len(raw or b"") > _MAX_RESPONSE_BYTES:
+                        message = "响应体过大（>{:,} 字节），已拒绝".format(
+                            _MAX_RESPONSE_BYTES)
+                        self.db.record_llm_result("default", task_type, 0, False, message)
+                        raise LLMCallFailed(message)
+                    value = json.loads(raw.decode("utf-8", errors="replace"))
                 break
             except urllib.error.HTTPError as exc:
                 message = "HTTP {}: {}".format(
-                    exc.code, exc.read().decode("utf-8", errors="replace")[:300])
+                    exc.code, exc.read(4096).decode("utf-8", errors="replace")[:300])
                 if exc.code in (401, 403):
                     # 鉴权失败是确定性错误：重试无效，抛 LLMAuthError 供上层熔断
                     self.db.record_llm_result("default", task_type, 0, False, message)
@@ -204,7 +214,8 @@ class LLMClient:
         return [_clean_text(item, per_item) for item in value[:limit]]
 
     def interpret_sector(self, sector_name: str, material: str) -> Dict[str, Any]:
-        prompt = SECTOR_SYSTEM + "\n\n=== 板块：{} ===\n{}".format(sector_name, material)
+        # system 提示词已在 messages 中单独携带，user 消息只放板块素材，避免重复计费
+        prompt = "=== 板块：{} ===\n{}".format(sector_name, material)
         value = self._chat_json(SECTOR_SYSTEM, prompt, "sector")
         return {
             "headline": _clean_text(value.get("headline"), 80),
@@ -214,7 +225,8 @@ class LLMClient:
         }
 
     def interpret_overall(self, material: str) -> Dict[str, Any]:
-        prompt = OVERALL_SYSTEM + "\n\n=== 各板块数据摘要 ===\n" + material
+        # system 提示词已在 messages 中单独携带，user 消息只放数据摘要
+        prompt = "=== 各板块数据摘要 ===\n" + material
         value = self._chat_json(OVERALL_SYSTEM, prompt, "overall")
         return {
             "headline": _clean_text(value.get("headline"), 80),

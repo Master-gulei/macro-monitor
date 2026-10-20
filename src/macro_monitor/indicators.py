@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import calendar
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # 七大板块
 SECTORS: List[Dict[str, str]] = [
@@ -248,6 +248,88 @@ KIND_UNIT: Dict[str, str] = {
     "pmi_emp_manuf": "%",
     "npm_emp": "%",
 }
+
+# 70 城聚合口径：上涨城市数（环比/同比）与一线/二线/三线均值
+# （pipeline 抓取素材与 report 卡片共用同一份定义，避免两处维护）
+HOUSE_AGG_KINDS = ("rise_count_mom", "rise_count_yoy",
+                   "tier1_mom", "tier1_yoy", "tier2_mom", "tier2_yoy",
+                   "tier3_mom", "tier3_yoy")
+
+# 数据合理性校验：精确规则 (指标, kind) -> (下界, 上界)，None 表示无界。
+# 超出区间不阻止入库，仅记录告警供 status 与看板复核——
+# 针对“解析口径错误但数值形态正常”这类最隐蔽的错误（历史教训：
+# CPI 环比错存同比指数，在库中静默存在 12 个月）。
+SANE_RANGES: Dict[Tuple[str, str], Tuple[Optional[float], Optional[float]]] = {
+    ("pmi", "value"): (35, 65),
+    ("cpi", "yoy"): (-5, 15),
+    ("cpi", "mom"): (-3, 5),
+    ("ppi", "yoy"): (-15, 20),
+    # 实际极值：2021-03 +34.2%（低基数），区间要能容纳真实历史波动
+    ("retail_sales", "yoy"): (-40, 50),
+    ("retail_sales", "value"): (0, None),
+    ("ind_va", "yoy"): (-20, 30),
+    ("ind_va", "indva_mom"): (-3, 8),
+    ("ind_profit", "accum_yoy"): (-60, 80),
+    ("ind_profit", "month_yoy"): (-60, 80),
+    ("ind_profit", "accum"): (0, None),
+    # 实际极值：2021-02 出口同比 +154.9%（低基数）；区间仅拦截口径级错误（如指数当涨跌幅）
+    ("trade_total", "yoy"): (-200, 200),
+    ("trade_total", "value"): (0, None),
+    ("trade_total", "export"): (0, None),
+    ("trade_total", "import"): (0, None),
+    ("trade_total", "export_yoy"): (-200, 200),
+    ("trade_total", "import_yoy"): (-200, 200),
+    # 实际极值：2020-02 -62.0 / 2020-03 +129.6（疫情），春节月份 ±45 常见
+    ("trade_total", "export_mom"): (-150, 150),
+    ("trade_total", "import_mom"): (-150, 150),
+    ("trade_total", "export_accum"): (0, None),
+    ("trade_total", "import_accum"): (0, None),
+    # 实际极值：2021-02 出口累计同比 +60.4（低基数）
+    ("trade_total", "export_accum_yoy"): (-200, 200),
+    ("trade_total", "import_accum_yoy"): (-200, 200),
+    ("unemp_rate", "unemp_rate"): (2, 12),
+    ("unemp_rate", "lab_hours"): (30, 55),
+    ("new_jobs", "accum"): (0, None),
+    ("export_price_index", "value"): (70, 130),
+    ("house_70", "rise_count_mom"): (0, 70),
+    ("house_70", "rise_count_yoy"): (0, 70),
+}
+
+# 前缀规则：kind 以 prefix 开头且以 suffix 结尾时适用（列表形式支持同一前缀的多种后缀）
+SANE_PREFIX_RULES: List[Tuple[str, str, str, Tuple[Optional[float], Optional[float]]]] = [
+    ("cpi", "cpi_", "_yoy", (-40, 60)),
+    ("ppi", "ppi_", "_yoy", (-40, 40)),
+    ("ind_va", "indva_", "_yoy", (-25, 35)),
+    ("retail_sales", "retail_", "_yoy", (-35, 35)),
+    ("unemp_rate", "lab_", "", (2, 20)),
+    ("house_70", "city_", "", (85, 115)),
+    ("house_70", "tier", "", (85, 115)),
+    ("house_70", "new_a", "", (85, 115)),
+    ("house_70", "sec_a", "", (85, 115)),
+    ("pmi", "pmi_", "", (30, 70)),
+    ("pmi", "npm_", "", (30, 70)),
+    ("ind_profit", "profit_", "_yoy", (-60, 80)),
+    ("ind_profit", "profit_", "_accum", (0, None)),
+]
+
+
+def sanity_check(indicator_id: str, kind: str, value: float) -> Optional[str]:
+    """值域合理性校验：返回告警文案，通过则返回 None。"""
+    rule = SANE_RANGES.get((indicator_id, kind))
+    if rule is None:
+        for iid, prefix, suffix, bounds in SANE_PREFIX_RULES:
+            if iid == indicator_id and kind.startswith(prefix) \
+                    and (not suffix or kind.endswith(suffix)):
+                rule = bounds
+                break
+    if rule is None:
+        return None
+    low, high = rule
+    if low is not None and value < low:
+        return "低于合理区间下界 {}（历史教训：口径错误可静默存库多月）".format(low)
+    if high is not None and value > high:
+        return "高于合理区间上界 {}（历史教训：口径错误可静默存库多月）".format(high)
+    return None
 
 # 各指标发布规则：day 为该指标次月数据的例行发布日，None 表示月末最后一天
 RELEASE_RULES: Dict[str, Dict[str, Any]] = {

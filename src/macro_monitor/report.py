@@ -74,6 +74,10 @@ border-radius:999px;padding:2px 10px;color:#0b0e15}
 .light.red{background:var(--red);box-shadow:0 0 14px rgba(248,113,113,.5)}
 .light.gray{background:#3a4358;color:#aab3c8}
 .row-missing td{color:var(--muted)}
+.warn-banner{background:var(--red-soft);border:1px solid rgba(248,113,113,.4);
+border-radius:16px;padding:14px 20px;margin:22px 0 0}
+.warn-banner b{color:var(--red)}
+.warn-banner li{font-size:12.5px;margin:2px 0 2px 18px;color:#e6b3b3}
 .tag{display:inline-block;font-size:11.5px;font-weight:600;border-radius:999px;padding:2px 9px;margin-right:6px}
 .tag.src{background:var(--accent-soft);color:var(--accent-2)}
 .tag.miss{background:var(--red-soft);color:var(--red)}
@@ -119,6 +123,10 @@ footer li{margin:3px 0 3px 18px}
 """
 
 _ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
+# 备用 CDN（unpkg 与 jsdelivr 提供同一 npm 构建，SRI 哈希一致）
+_ECHARTS_FALLBACK_CDN = "https://unpkg.com/echarts@5.5.1/dist/echarts.min.js"
+# A1：echarts@5.5.1/dist/echarts.min.js 的 sha384 完整性校验值（本地已实测下载比对）
+_ECHARTS_SRI = "sha384-Mx5lkUEQPM1pOJCwFtUICyX45KNojXbkWdYhkKUKsbv391mavbfoAmONbzkgYPzR"
 
 _PALETTE = ["#8b7cff", "#e8b13c", "#34d399", "#58a6ff", "#f87171", "#a78bfa"]
 
@@ -234,6 +242,13 @@ def _light_cell(color: Optional[str]) -> str:
     return '<span class="light {}">{}</span>'.format(cls, label)
 
 
+def _sector_cell(sector: str, color: str) -> str:
+    """板块列单元格（色点 + 板块名），总览与数据日历共用。"""
+    return ('<span class="dot" style="background:{color};'
+            'box-shadow:0 0 8px {color}"></span>{sector}').format(
+        color=esc(color), sector=esc(sector))
+
+
 def _overview_rows(db: Database) -> List[Dict[str, Any]]:
     rows = []
     for spec in indicators.INDICATORS:
@@ -268,6 +283,7 @@ def _overview_rows(db: Database) -> List[Dict[str, Any]]:
             "light_note": light_note,
             "arrow": arrow,
             "direction": direction,
+            "missing": not latest,
         })
     return rows
 
@@ -341,8 +357,7 @@ def _house_agg_cards(db: Database) -> Tuple[str, List[Dict[str, Any]]]:
     latest = db.latest_by_kinds("house_70")
     period = (latest.get("rise_count_mom") or {}).get("period", "")
     cards = []
-    for kind in ("rise_count_mom", "rise_count_yoy", "tier1_mom", "tier1_yoy",
-                 "tier2_mom", "tier2_yoy", "tier3_mom", "tier3_yoy"):
+    for kind in indicators.HOUSE_AGG_KINDS:
         row = latest.get(kind)
         cards.append({
             "label": indicators.KIND_META.get(kind, kind),
@@ -446,9 +461,7 @@ def _render_overview(rows: List[Dict[str, Any]], note: str) -> str:
                     "red": "var(--red)"}
     body = []
     for row in rows:
-        sector_cell = ('<span class="dot" style="background:{color};'
-                       'box-shadow:0 0 8px {color}"></span>{sector}').format(
-            color=esc(row["sector_color"]), sector=esc(row["sector"]))
+        sector_cell = _sector_cell(row["sector"], row["sector_color"])
         if row["direction"]:
             color = light_colors.get(row["light"] or "", "var(--muted)")
             basis = '{}<span class="dir" style="color:{}">{} {}</span>'.format(
@@ -456,15 +469,17 @@ def _render_overview(rows: List[Dict[str, Any]], note: str) -> str:
                 esc(row["direction"]))
         else:
             basis = esc(row["light_note"]) or "—"
+        cls = " class=\"row-missing\"" if row["missing"] else ""
+        tag = '<span class="tag miss">数据缺失</span>' if row["missing"] else ""
         cells = [
             "<td>{}</td>".format(sector_cell),
-            "<td>{}</td>".format(esc(row["name"])),
+            "<td>{}{}</td>".format(esc(row["name"]), tag),
             '<td class="num">{}</td>'.format(esc(row["value"])),
             "<td>{}</td>".format(esc(_fmt_period(row["period"]))),
             "<td>{}</td>".format(_light_cell(row["light"])),
             "<td>{}</td>".format(basis),
         ]
-        body.append("<tr>{}</tr>".format("".join(cells)))
+        body.append("<tr{}>{}</tr>".format(cls, "".join(cells)))
     return ('<table><thead><tr><th>板块</th><th>指标</th><th class="num">最新值</th>'
             '<th>数据期</th><th>信号</th><th>信号依据</th></tr></thead><tbody>{}</tbody></table>'
             '<p class="sec-note" style="margin-top:12px">{}</p>').format("".join(body), esc(note))
@@ -542,8 +557,8 @@ def _render_charts(specs: List[Dict[str, Any]]) -> str:
                 html.escape(json.dumps(payload, ensure_ascii=False), quote=True),
                 esc(spec["title"]), fallback))
     return ('<div class="chart-grid">{}</div>'
-            '<p class="sec-note" style="margin-top:12px">图表由 ECharts CDN 渲染；'
-            'CDN 不可用时自动降级为上方表格。</p>').format("".join(blocks))
+            '<p class="sec-note" style="margin-top:12px">图表由 ECharts CDN 渲染（SRI 完整性校验 + 备用 CDN）；'
+            'CDN 均不可用时自动降级为上方表格。</p>').format("".join(blocks))
 
 
 def _render_house(db: Database) -> str:
@@ -607,9 +622,7 @@ def _render_calendar(rows: List[Dict[str, Any]]) -> str:
     for row in rows:
         cls = " class=\"row-missing\"" if row["missing"] else ""
         tag = '<span class="tag miss">数据缺失</span>' if row["missing"] else ""
-        sector_cell = ('<span class="dot" style="background:{color};'
-                       'box-shadow:0 0 8px {color}"></span>{sector}').format(
-            color=esc(row["sector_color"]), sector=esc(row["sector"]))
+        sector_cell = _sector_cell(row["sector"], row["sector_color"])
         dir_html = ('<span class="dir" style="color:var(--muted)">{} {}</span>'.format(
             esc(row["arrow"]), esc(row["direction"]))) if row["direction"] else "—"
         body.append(
@@ -622,6 +635,24 @@ def _render_calendar(rows: List[Dict[str, Any]]) -> str:
             '<th>较上期</th><th>数据来源</th><th>最新数据期</th>'
             '<th class="num">预计下期发布</th><th>备注</th></tr></thead>'
             '<tbody>{}</tbody></table>').format("".join(body))
+
+
+def _render_warnings(warnings: List[Dict[str, Any]], total: int) -> str:
+    """S1：数据合理性告警横幅；无告警时返回空串。"""
+    if not warnings:
+        return ""
+    items = "".join(
+        "<li>[{indicator}:{kind}] {period}{city} = {value}：{message}</li>".format(
+            indicator=esc(item["indicator_id"]), kind=esc(item["kind"]),
+            period=esc(item["period"]),
+            city=esc(" " + item["city"]) if item.get("city") else "",
+            value=fmt_value(item.get("value")),
+            message=esc(item["message"]))
+        for item in warnings)
+    return ('<div class="warn-banner"><b>数据合理性告警（共 {} 条，展示最新 {} 条）</b>'
+            '<ul>{}</ul><p class="sec-note" style="margin:6px 0 0">'
+            '越界观测仍按原值入库展示，请核对官方发布数据。</p></div>').format(
+        total, len(warnings), items)
 
 
 def _render_sources(rows: List[Dict[str, Any]]) -> str:
@@ -728,6 +759,7 @@ def render_report(db: Database, config: Dict[str, Any], today: Optional[Any] = N
 </nav>
 </div></header>
 <main class="wrap">
+{warnings}
 <h2 class="sec" id="overview"><span class="sec-num">01</span>景气总览红绿灯</h2>
 <p class="sec-note">信号基于最新可得数据；箭头与“较上期”为与上一数据期的变化方向及幅度；部分指标数据期不同（如工业企业利润滞后一个月），以数据日历为准。</p>
 {overview}
@@ -752,7 +784,8 @@ def render_report(db: Database, config: Dict[str, Any], today: Optional[Any] = N
 <ul><li>单一指标获取失败不会影响其他指标（多源兜底）；"数据缺失"标注表示当前网络环境无法访问对应官方渠道。</li>
 <li>红绿灯阈值：{threshold}</li></ul>
 </div></footer>
-<script src="{echarts_cdn}"></script>
+<script src="{echarts_cdn}" integrity="{echarts_sri}" crossorigin="anonymous"
+        onerror="(function(){{var s=document.createElement('script');s.src='{echarts_fallback}';s.integrity='{echarts_sri}';s.crossOrigin='anonymous';s.onload=function(){{if(typeof renderCharts==='function'){{renderCharts();}}}};document.head.appendChild(s);}})()"></script>
 <script>{chart_js}</script>
 </body>
 </html>""".format(
@@ -770,8 +803,11 @@ def render_report(db: Database, config: Dict[str, Any], today: Optional[Any] = N
         house=_render_house(db),
         calendar=_render_calendar(_calendar_rows(db)),
         sources=_render_sources(_source_rows()),
+        warnings=_render_warnings(db.recent_warnings(8), db.warning_count()),
         threshold=esc(threshold_note),
         echarts_cdn=_ECHARTS_CDN,
+        echarts_fallback=_ECHARTS_FALLBACK_CDN,
+        echarts_sri=_ECHARTS_SRI,
         chart_js=_CHART_JS.replace("__PALETTE__", json.dumps(_PALETTE)),
     )
     return html_text

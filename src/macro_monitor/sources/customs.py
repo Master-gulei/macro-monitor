@@ -5,8 +5,8 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..fetch import SafeFetcher
-from . import SourceError
-from .statsweb import parse_html
+from . import HtmlSource, SourceError
+from .html_parser import parse_html
 
 # 海关总署官网：统计快讯（进出口总值表）与外贸指数（出口价格指数）
 # 注意：部分网络环境无法访问海关官网（超时/风控），此时该源失败并由流水线降级。
@@ -16,8 +16,10 @@ KUIXUN_LINK_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月全国进出口总值�
 TRADE_INDEX_LINK_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月中国外贸指数")
 
 
-class CustomsSource:
+class CustomsSource(HtmlSource):
     """海关总署官网页面解析（进出口总值快讯 + 外贸指数）。"""
+
+    html_purpose = "customs_page"
 
     def __init__(self, fetcher: SafeFetcher, config: Dict[str, Any]):
         self.fetcher = fetcher
@@ -25,10 +27,6 @@ class CustomsSource:
         cfg = config.get("customs") or {}
         self.kuaixun_index = str(cfg.get("kuaixun_index", ""))
         self.trade_index_page = str(cfg.get("trade_index_page", ""))
-
-    def _fetch_html(self, url: str) -> Optional[bytes]:
-        return self.fetcher.fetch(url, mode="automatic", purpose="customs_page",
-                                  accept="text/html,application/xhtml+xml")
 
     def _first_link(self, index_url: str, pattern: re.Pattern, referer: str) -> Tuple[
             Optional[str], Optional[str]]:

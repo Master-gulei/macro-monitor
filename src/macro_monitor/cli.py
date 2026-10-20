@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+from . import indicators
 from .ai import LLMClient
 from .config import ConfigError, load_config, project_paths
 from .db import Database
@@ -13,12 +14,18 @@ from .fetch import SafeFetcher
 from .pipeline import MonthlyPipeline
 
 
-def build(project: Path) -> Tuple[Dict[str, Any], Dict[str, Path], Database, MonthlyPipeline]:
+def load_core(project: Path) -> Tuple[Dict[str, Any], Dict[str, Path], Database]:
+    """加载配置与数据库（不构造网络与 LLM 客户端），dry-run 与 build 共用。"""
     config = load_config(project)
     paths = project_paths(project)
     db = Database(paths["database"])
     # 每次启动把 config 里的月预算同步到 settings，供 status 展示与审计
     db.set_setting("monthly_token_budget", config["llm"]["monthly_token_budget"])
+    return config, paths, db
+
+
+def build(project: Path) -> Tuple[Dict[str, Any], Dict[str, Path], Database, MonthlyPipeline]:
+    config, paths, db = load_core(project)
     fetcher = SafeFetcher(db, config, paths["data"] / "network.lock")
     llm = LLMClient(db, config)
     pipeline = MonthlyPipeline(project, db, config, fetcher, llm)
@@ -58,10 +65,8 @@ def main() -> None:
     project = args.project.expanduser().resolve()
     try:
         if args.command == "run" and args.dry_run:
-            config = load_config(project)  # 校验配置本身
-            paths = project_paths(project)
-            db = Database(paths["database"])
-            db.set_setting("monthly_token_budget", config["llm"]["monthly_token_budget"])
+            # 仅校验配置并输出状态，不构造网络与 LLM 客户端（与 build 共用 load_core）
+            config, paths, db = load_core(project)
             output({"status": "config_ok",
                     "site": config["site"],
                     "llm": {key: config["llm"][key] for key in
@@ -81,8 +86,18 @@ def main() -> None:
                 else:
                     output(pipeline.build_report())
             elif args.command == "status":
+                freshness = db.indicator_freshness()
                 output({**db.status(), "database": str(paths["database"]),
-                        "out_dir": str(paths["out"])})
+                        "out_dir": str(paths["out"]),
+                        "indicator_freshness": {
+                            spec["id"]: {
+                                "name": spec["name"],
+                                "latest_period": freshness.get(spec["id"], {}).get(
+                                    "latest_period", ""),
+                                "months_behind": freshness.get(spec["id"], {}).get(
+                                    "months_behind"),
+                            } for spec in indicators.INDICATORS},
+                        "recent_warnings": db.recent_warnings(10)})
             elif args.command == "reset-budget":
                 output({"ok": True, "budget_month": db.reset_budget_month(),
                         "llm_tokens_this_month": db.llm_usage_this_month()})

@@ -5,8 +5,8 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 from ..fetch import SafeFetcher
-from . import SourceError
-from .statsweb import parse_html
+from . import HtmlSource, SourceError
+from .html_parser import parse_html
 
 # 人力资源社会保障部：季度例行新闻发布会实录（城镇新增就业累计值）
 
@@ -16,18 +16,16 @@ _QUARTER_END = {"一季度": 3, "二季度": 6, "三季度": 9, "四季度": 12,
 _QUARTER_WORDS = re.compile(r"一季度|二季度|三季度|四季度|上半年|前三季度")
 
 
-class MohrssSource:
+class MohrssSource(HtmlSource):
     """人力资源社会保障部官网（www.mohrss.gov.cn）新闻发布会实录解析。"""
+
+    html_purpose = "mohrss_page"
 
     def __init__(self, fetcher: SafeFetcher, config: Dict[str, Any]):
         self.fetcher = fetcher
         self.config = config
         self.base = str(config.get("mohrss", {}).get(
             "base_url", "https://www.mohrss.gov.cn")).rstrip("/")
-
-    def _fetch_html(self, url: str) -> Optional[bytes]:
-        return self.fetcher.fetch(url, mode="automatic", purpose="mohrss_page",
-                                  accept="text/html,application/xhtml+xml")
 
     def _find_press_url(self, parser: Any) -> Any:
         """在页面链接中找第一个季度新闻发布会链接，返回 (绝对 URL, 链接文本)。

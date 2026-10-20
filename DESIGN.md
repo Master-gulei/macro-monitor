@@ -7,7 +7,8 @@
 - **约束**：纯 Python 标准库（无第三方依赖）；SQLite 本地存储；单文件 HTML（黑底暗色主题、
   立体感表格全屏铺满、ECharts CDN，失败自动降级为表格）；AI 只用官方已发布数值，禁止编造。
 - **容错原则**：指标级容错（单指标失败不拖垮整体）、多源兜底、单指标失败在
-  "数据日历"标注"数据缺失"，看板仍完整生成。
+  "数据日历"标注"数据缺失"，看板仍完整生成；入库前逐行做口径合理性校验，
+  越界值告警留痕但不阻断流程。
 
 ## 2. 指标注册表（11 指标 × 主源/兜底 + 分类细项）
 
@@ -26,7 +27,7 @@
 | 房价 | 70城新建/二手价格指数(环比/同比/上涨城市数) | 统计局官网月度新闻稿 | NBS csyd 城市月度库 |
 | 工业 | 工业增加值同比 | NBS easyquery（hgyd 库） | 东方财富 RPT_ECONOMY_INDUS_GROW |
 | 工业 | 工业企业利润(累计+累计同比+当月同比) | 统计局官网月度新闻稿 | NBS easyquery（hgyd 库） |
-| 进出口 | 进出口总值(当月/出口/进口/同比/环比/累计) | 海关总署统计快讯 HTML | 东方财富 RPT_ECONOMY_CUSTOMS → NBS hgyd |
+| 进出口 | 进出口总值(当月/出口/进口/同比/环比/累计) | 海关总署统计快讯 HTML | 东方财富 RPT_ECONOMY_CUSTOMS |
 | 进出口 | 出口价格指数(上年同月=100) | 海关总署外贸指数 HTML | 受限指标，失败时看板标注 |
 
 ### 分类细项清单（来自统计局新闻稿/经济运行情况稿与东方财富字段）
@@ -51,31 +52,42 @@
 
 | 模块 | 职责 |
 |---|---|
-| `config.py` | config.json + local_config.json 深合并、路径解析 |
-| `db.py` | SQLite schema、观测 upsert/series、解读、settings、请求审计、LLM 用量、sync_runs |
+| `config.py` | config.json + local_config.json 浅合并覆盖、路径解析、安全白名单与 LLM base_url 主机校验 |
+| `db.py` | SQLite schema、观测批写入（批内去重）upsert/series、解读、settings、请求审计、LLM 用量、sync_runs、data_warnings 告警表、SQLite 在线备份 |
 | `fetch.py` | SafeFetcher：host 白名单、月度请求预算、最小间隔、跨进程锁、TLS 例外、审计 |
-| `indicators.py` | 指标注册表、70 城分线名单、kind 元数据/单位、发布规则、红绿灯规则 |
-| `sources/nbs.py` | easyquery：GetTree 按名称关键词自动发现指标代码并缓存；QueryData 带浏览器 UA/Referer |
-| `sources/statsweb.py` | 官网新闻稿：列表页定位最新发布链接 → 解析正文表格（70 城左右双栏表、利润正文+表格兜底）；`fetch_news_detail` 按行名取分类细项（两种表结构：涨跌幅表与「指标|9月|1—9月」表），70 城分面积表聚合全国均值；`fetch_unemp` 从国民经济运行情况稿解析失业率句子（月度/季度两式）；`fetch_pmi_detail` 解析 PMI 时间序列表（按表头取列、重复渲染去重） |
+| `indicators.py` | 指标注册表、70 城分线名单、kind 元数据/单位、发布规则、红绿灯规则、入库合理性校验区间（SANE_RANGES/前缀规则） |
+| `sources/nbs.py` | easyquery：GetTree 按名称关键词自动发现指标代码并缓存；QueryData 带浏览器 UA/Accept 头 |
+| `sources/__init__.py` | `HtmlSource` 基类：统一 `_fetch_html`（purpose、HTML Accept、可选 404） |
+| `sources/html_parser.py` | 通用 HTML 表格解析（parse_html） |
+| `sources/statsweb_patterns.py` | 统计局新闻稿链接/标题正则与行名归一化（叶子模块，各 Mixin 共用） |
+| `sources/statsweb.py` | 官网新闻稿入口：列表页/经济运行稿列表定位最新发布链接；组合下列 Mixin 并重导出 patterns/parse_html 以兼容既有引用 |
+| `sources/statsweb_house.py` | HouseMixin：70 城新建/二手左右双栏表 + 分面积段全国均值聚合 |
+| `sources/statsweb_profit.py` | ProfitMixin：工业企业利润正文句子 + 表格兜底（分企业类型/分行业） |
+| `sources/statsweb_news.py` | NewsDetailMixin：分类细项按行名取数（涨跌幅表与「指标|9月|1—9月」表两式） |
+| `sources/statsweb_unemp.py` | UnempMixin：国民经济运行情况稿失业率句子解析（月度/季度两式） |
+| `sources/statsweb_pmi.py` | PmiMixin：PMI 时间序列表按表头取列（重复渲染去重） |
 | `sources/eastmoney.py` | datacenter-web 通用封装：reportName/字段从注册表注入，dict/list 两种字段写法 |
 | `sources/customs.py` | 快讯列表定位最新"全国进出口总值表"解析 HTML；外贸指数页按月列表格解析 |
 | `sources/mohrss.py` | 人社部官网：首页定位季度新闻发布会实录链接，解析城镇新增就业（累计） |
-| `ai.py` | OpenAI 兼容客户端（默认 DeepSeek，thinking 关闭），JSON 解析失败自动重试一次，月度预算 |
-| `pipeline.py` | 流水线：抓取（指标级容错）→ 70 城聚合 → AI 解读（7 板块+综合）→ 看板；每月幂等；缺失指标自带 missing_note 写入板块素材注明 |
-| `report.py` | 单文件 HTML 渲染：红绿灯（信号依据含较上期升/降方向与幅度）、AI 卡片、ECharts 图表（暗色适配，含表格降级）、70 城专项、数据日历（含较上期列）、数据源附录；黑底暗色主题、多层阴影立体表格、全屏铺满布局 |
+| `ai.py` | OpenAI 兼容客户端（默认 DeepSeek，thinking 关闭），JSON 解析失败自动重试一次，月度预算，单次响应体 10 MB 上限，鉴权错误与瞬时错误分类处理 |
+| `pipeline.py` | 流水线：抓取（指标级容错 + 入库前合理性校验）→ 70 城聚合 → AI 解读（7 板块+综合，连续失败熔断）→ 看板（生成失败隔离）；抓取成功后自动备份 DB；每次生成后按 keep_reports 清理旧看板；每月幂等；缺失指标自带 missing_note 写入板块素材注明 |
+| `report.py` | 单文件 HTML 渲染：红绿灯（信号依据含较上期升/降方向与幅度）、AI 卡片、ECharts 图表（SRI 完整性校验 + 备用 CDN，含表格降级）、70 城专项、数据日历（含较上期列）、数据源附录、告警横幅与缺数高亮；黑底暗色主题、多层阴影立体表格、全屏铺满布局 |
 
 ## 4. 数据流
 
 ```
 run --force --refresh-ai
- ├─ 1. fetch_data：对每个指标按 sources 顺序尝试，成功后按 (indicator,period,kind,city) upsert；
+ ├─ 1. fetch_data：对每个指标按 sources 顺序尝试，成功后批量按 (indicator,period,kind,city) upsert
+ │     （批内去重）；入库前逐行合理性校验，越界值写入 data_warnings 告警；
  │     主指标成功后再执行 detail_sources（分类细项，失败容错仅记 detail_errors）；
- │     11 个指标至少 9 个成功即 success
- ├─ 2. aggregate_house：最新期 70 城明细 → 上涨城市数（环比/同比）+ 一线/二线/三线均值（幂等覆盖）
+ │     11 个指标至少 9 个成功即 success；抓到新数据后用 SQLite 在线备份 API 快照 macro.db.bak
+ ├─ 2. aggregate_house：对库内所有数据期 70 城明细 → 上涨城市数（环比/同比）+ 一线/二线/三线均值（幂等覆盖）
  ├─ 3. interpret：每板块输入"官方数值+同比环比+近 12 个月趋势+分类细项（最新值与上期值）"，
  │     prompt 强制只用给定数据、结合细项结构指出拉动/拖累项；缺失口径以「注：」形式在素材中注明；
- │     7 板块成功后汇总 headline 生成综合研判；预算/密钥异常时停止后续调用
- └─ 4. build_report：读库渲染单文件 HTML 到 out\宏观监测-YYYY-MM-DD.html
+ │     7 板块成功后汇总 headline 生成综合研判；预算/密钥异常立即停止后续调用，
+ │     其他失败连续 3 次熔断跳过剩余板块
+ └─ 4. build_report：读库渲染单文件 HTML 到 out\宏观监测-YYYY-MM-DD.html；
+      生成失败单独隔离不影响已完成的抓取/解读；生成后按 site.keep_reports 清理旧看板
 ```
 
 ## 5. 数据库（SQLite，data/macro.db）
@@ -87,6 +99,7 @@ run --force --refresh-ai
 - `network_requests`：全量请求审计（mode/purpose/host/status/outcome）
 - `provider_usage`：LLM 每次调用 token 与成败，月度预算按自然月自动前滚
 - `sync_runs`：每次抓取运行的状态记录
+- `data_warnings`：入库合理性校验越界告警（indicator/period/kind/value/message），供 status 与看板横幅展示
 
 ## 6. 风控与容错
 
@@ -96,6 +109,14 @@ run --force --refresh-ai
 - **指标级容错**：单源异常（403/502/解析失败）切换到下一兜底源，全部失败仅标注缺失
 - **LLM 预算**：默认 200K tokens/月，触顶抛 BudgetExceeded 并停止后续调用；
   JSON 解析失败自动重试一次；失败调用不计入预算
+- **LLM 熔断**：鉴权/预算异常（401/403/超额）立即熔断；其他失败连续 3 次熔断跳过剩余板块
+- **LLM 响应上限**：单次响应体 10 MB 上限，超限拒绝且不计入预算
+- **LLM base_url 白名单**：config 校验 base_url 主机在 `llm.allowed_hosts` 内（防 API Key 被发送到任意地址）
+- **数据合理性校验**：每行入库前按指标口径校验合理区间（SANE_RANGES/前缀规则），越界照常入库但写入 data_warnings
+- **看板脚本安全**：ECharts 附 sha384 SRI 完整性校验，CDN 不可用切换 unpkg 备用，均不可用降级表格
+- **数据库备份**：抓取到新数据后自动快照 `data/macro.db.bak`（SQLite 在线备份 API，WAL 安全）
+- **看板保留**：`out/` 仅保留最近 `site.keep_reports` 份看板
+- **失败隔离**：看板生成失败不影响抓取/解读结果
 - **幂等**：抓取/解读按月去重，观测按主键覆盖更新；重复运行安全
 
 ## 7. 发布日历与红绿灯

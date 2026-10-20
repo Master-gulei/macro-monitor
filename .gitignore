@@ -1,5 +1,6 @@
 data/*.db
 data/*.db-*
+data/*.bak
 data/*.lock
 data/*.log
 data/cache/

@@ -34,11 +34,6 @@ _SOURCE_DISPATCH: Dict[str, Tuple[str, str]] = {
     "mohrss_release": ("mohrss", "fetch_new_jobs"),
 }
 
-# 70 城聚合口径：上涨城市数（环比/同比）与一线/二线/三线均值
-_HOUSE_AGG_KINDS = ("rise_count_mom", "rise_count_yoy",
-                    "tier1_mom", "tier1_yoy", "tier2_mom", "tier2_yoy",
-                    "tier3_mom", "tier3_yoy")
-
 # 70 城分面积段聚合 kinds（新建/二手 × 90㎡以下/90-144㎡/144㎡以上 × 环比/同比）
 _HOUSE_AREA_KINDS = (
     "new_a90_mom", "new_a90_yoy", "new_a90144_mom", "new_a90144_yoy",
@@ -64,6 +59,10 @@ class MonthlyPipeline:
     (indicator_id, period, kind, city) 覆盖更新。
     """
 
+    # S2：同一类非确定性失败（响应解析失败等）连续达到该次数后熔断，
+    # 跳过剩余板块，避免坏响应把整月预算烧完
+    _MAX_CONSECUTIVE_LLM_FAILURES = 3
+
     def __init__(self, project: Path, db: Database, config: Dict[str, Any],
                  fetcher: SafeFetcher, llm: LLMClient,
                  sources: Optional[Dict[str, Any]] = None):
@@ -79,8 +78,12 @@ class MonthlyPipeline:
     def _save_payload(self, indicator_id: str, spec: Dict[str, Any],
                       payload: Dict[str, Any], result_period: str,
                       source_label: str) -> Tuple[int, int, int]:
-        """把 payload 里的观测行写入数据库，返回 (saved, inserted, updated)。"""
-        saved = inserted = updated = 0
+        """把 payload 里的观测行批量写入数据库，返回 (saved, inserted, updated)。
+
+        写入前逐行做数据合理性校验（S1）：越界值照常入库，但记录告警供
+        status/看板展示——避免历史上 CPI 环比错误静默入库 12 个月的情况。
+        """
+        rows: List[Dict[str, Any]] = []
         for row in payload.get("rows") or []:
             period = str(row.get("period") or result_period)
             if len(period) != 7 or period[4] != "-":
@@ -93,12 +96,15 @@ class MonthlyPipeline:
             city = str(row.get("city") or "")
             unit = (row.get("unit") or indicators.KIND_UNIT.get(kind, "")
                     or spec.get("unit", ""))
-            event = self.db.upsert_observation(
-                indicator_id, period, kind, value, source_label, city=city, unit=unit)
-            inserted += int(event == "inserted")
-            updated += int(event == "updated")
-            saved += 1
-        return saved, inserted, updated
+            rows.append({"indicator_id": indicator_id, "period": period,
+                         "kind": kind, "city": city, "value": value,
+                         "unit": unit, "source": source_label})
+            message = indicators.sanity_check(indicator_id, kind, value)
+            if message:
+                self.db.record_warning(indicator_id, period, kind, value,
+                                       message, city=city)
+        inserted, updated = self.db.upsert_observations(rows)
+        return len(rows), inserted, updated
 
     def fetch_data(self, force: bool = False) -> Dict[str, Any]:
         month_key = Database.current_month_key()
@@ -168,7 +174,8 @@ class MonthlyPipeline:
         if fetched > 0:
             self.db.set_setting("last_fetch_month", month_key)
         return {"status": status, "fetched": fetched, "inserted": inserted,
-                "updated": updated, "indicators": results}
+                "updated": updated, "indicators": results,
+                "data_warnings": self.db.warning_count()}
 
     # ---------- 步骤 2：70 城房价聚合 ----------
 
@@ -229,7 +236,7 @@ class MonthlyPipeline:
             if spec["id"] == "house_70":
                 agg = self.db.latest_by_kinds("house_70")
                 parts: List[str] = []
-                for kind in _HOUSE_AGG_KINDS:
+                for kind in indicators.HOUSE_AGG_KINDS:
                     row = agg.get(kind)
                     if row:
                         parts.append("{} {}{}".format(
@@ -302,10 +309,13 @@ class MonthlyPipeline:
         results: Dict[str, Any] = {}
         headlines: List[str] = []
         stop = False
+        stop_reason = ""
+        consecutive_failures = 0
         for sector in indicators.SECTORS:
             sector_id = sector["id"]
             if stop:
-                results[sector_id] = {"status": "failed", "error": "预算或密钥异常，跳过"}
+                results[sector_id] = {"status": "failed",
+                                      "error": stop_reason or "预算或密钥异常，跳过"}
                 continue
             material = self._sector_material(sector)
             if not material.strip():
@@ -318,12 +328,19 @@ class MonthlyPipeline:
                 results[sector_id] = {"status": "ok", "model": content.get("model", "")}
                 headlines.append("【{}】{}".format(sector["name"],
                                                    content.get("headline", "")))
+                consecutive_failures = 0
             except (LLMUnavailable, BudgetExceeded, LLMAuthError) as exc:
                 results[sector_id] = {"status": "failed", "error": str(exc)}
                 stop = True
+                stop_reason = "预算或密钥异常，跳过"
             except Exception as exc:
+                consecutive_failures += 1
                 results[sector_id] = {"status": "failed",
                                       "error": "{}: {}".format(type(exc).__name__, exc)}
+                if consecutive_failures >= self._MAX_CONSECUTIVE_LLM_FAILURES:
+                    stop = True
+                    stop_reason = "LLM 连续失败 {} 次，熔断跳过剩余板块".format(
+                        self._MAX_CONSECUTIVE_LLM_FAILURES)
         overall: Dict[str, Any] = {"status": "skipped"}
         if not stop and len(headlines) >= 2:
             try:
@@ -353,15 +370,47 @@ class MonthlyPipeline:
 
     def build_report(self, today: Optional[Any] = None) -> Dict[str, Any]:
         self.aggregate_house()  # 幂等：仅依据库内明细重算聚合
-        return build_report_html(self.db, self.config, self.project / "out", today=today)
+        result = build_report_html(self.db, self.config, self.project / "out", today=today)
+        self._prune_reports()
+        return result
+
+    def _prune_reports(self) -> None:
+        """F2：out/ 目录只保留最近 keep_reports 份看板（按文件修改时间）。"""
+        try:
+            keep = int((self.config.get("site") or {}).get("keep_reports", 6))
+            reports = sorted(
+                (self.project / "out").glob("宏观监测-*.html"),
+                key=lambda path: path.stat().st_mtime, reverse=True)
+            for old in reports[keep:]:
+                try:
+                    old.unlink()
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    def _backup_db(self) -> None:
+        """S5：抓取到新数据后备份库文件（SQLite 在线备份 API，WAL 安全）。"""
+        try:
+            self.db.backup(self.db.path.with_suffix(".db.bak"))
+        except Exception as exc:
+            self.db.record_warning("_system", "", "backup", 0.0,
+                                   "数据库备份失败: {}".format(exc))
 
     # ---------- 完整运行 ----------
 
     def run(self, force: bool = False, no_ai: bool = False,
             refresh_ai: bool = False) -> Dict[str, Any]:
         fetch = self.fetch_data(force=force)
+        if fetch.get("fetched", 0) > 0:
+            self._backup_db()
         interpret = self.interpret(force=refresh_ai, no_ai=no_ai)
-        report = self.build_report()
+        # S3：看板生成失败单独隔离，不影响已完成的抓取/解读结果
+        try:
+            report = self.build_report()
+        except Exception as exc:
+            report = {"status": "failed",
+                      "error": "{}: {}".format(type(exc).__name__, exc)}
         ok = report.get("status") == "success" and fetch.get("status") != "failed"
         return {"status": "success" if ok else "partial",
                 "fetch": fetch, "interpret": interpret, "report": report}

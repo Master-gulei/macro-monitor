@@ -5,7 +5,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -72,6 +72,18 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   inserted_count INTEGER NOT NULL DEFAULT 0,
   error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS data_warnings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  indicator_id TEXT NOT NULL,
+  period TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  city TEXT NOT NULL DEFAULT '',
+  value REAL,
+  message TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_warnings_created ON data_warnings(created_at);
 """
 
 
@@ -134,6 +146,52 @@ class Database:
             event = "updated"
         self.con.commit()
         return event
+
+    def upsert_observations(self, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
+        """批量写入观测值：单事务一次提交，返回 (inserted, updated)。
+
+        rows 元素字段：indicator_id / period / kind / city / value / unit / source。
+        与 upsert_observation 等价，但避免逐行 commit（70 城一次抓取约 280 行）。
+        """
+        now = int(time.time())
+        inserts: List[tuple] = []
+        updates: List[tuple] = []
+        # 批内去重：同 (indicator, period, kind, city) 保留最后一条，
+        # 避免页面重复渲染导致同一批里插入主键冲突
+        deduped: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+        for row in rows:
+            key = (str(row["indicator_id"]), str(row["period"]), str(row["kind"]),
+                   str(row.get("city") or ""))
+            deduped[key] = row
+        for row in deduped.values():
+            indicator_id = str(row["indicator_id"])
+            period = str(row["period"])
+            kind = str(row["kind"])
+            city = str(row.get("city") or "")
+            value = float(row["value"])
+            unit = str(row.get("unit") or "")
+            source = str(row.get("source") or "")
+            exists = self.con.execute(
+                "SELECT 1 FROM observations WHERE indicator_id=? AND period=? "
+                "AND kind=? AND city=?",
+                (indicator_id, period, kind, city),
+            ).fetchone()
+            if exists is None:
+                inserts.append((indicator_id, period, kind, city, value,
+                                unit, source, now))
+            else:
+                updates.append((value, unit, source, now, indicator_id,
+                                period, kind, city))
+        if inserts:
+            self.con.executemany(
+                "INSERT INTO observations(indicator_id,period,kind,city,value,unit,"
+                "source,fetched_at) VALUES(?,?,?,?,?,?,?,?)", inserts)
+        if updates:
+            self.con.executemany(
+                "UPDATE observations SET value=?,unit=?,source=?,fetched_at=? "
+                "WHERE indicator_id=? AND period=? AND kind=? AND city=?", updates)
+        self.con.commit()
+        return len(inserts), len(updates)
 
     def series(self, indicator_id: str, kind: Optional[str] = None,
                city: Optional[str] = "", limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -281,6 +339,50 @@ class Database:
         )
         self.con.commit()
 
+    # ---------- 数据合理性告警 ----------
+
+    def record_warning(self, indicator_id: str, period: str, kind: str,
+                       value: float, message: str, city: str = "") -> None:
+        """写入一条数据合理性告警；同一事件（指标/数据期/kind/城市/文案/数值）不重复写入。"""
+        message = message[:500]
+        key = (indicator_id, period, kind, city or "", message, float(value))
+        existing = self.con.execute(
+            "SELECT 1 FROM data_warnings WHERE indicator_id=? AND period=? AND kind=? "
+            "AND city=? AND message=? AND value=? LIMIT 1", key).fetchone()
+        if existing:
+            return
+        self.con.execute(
+            "INSERT INTO data_warnings(indicator_id,period,kind,city,value,message,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (indicator_id, period, kind, city or "", float(value),
+             message, int(time.time())),
+        )
+        self.con.commit()
+
+    def warning_count(self) -> int:
+        row = self.con.execute("SELECT COUNT(*) n FROM data_warnings").fetchone()
+        return int(row["n"])
+
+    def recent_warnings(self, limit: int = 20) -> List[Dict[str, Any]]:
+        rows = self.con.execute(
+            "SELECT * FROM data_warnings ORDER BY id DESC LIMIT ?", (int(limit),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---------- 备份 ----------
+
+    def backup(self, target: Path) -> Path:
+        """用 SQLite 在线备份 API 快照到 target（WAL 模式下同样安全）。"""
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        backup_con = sqlite3.connect(str(target))
+        try:
+            self.con.backup(backup_con)
+        finally:
+            # with 块只提交/回滚事务，不关闭连接；Windows 上必须显式关闭才能释放文件锁
+            backup_con.close()
+        return target
+
     # ---------- AI 解读 ----------
 
     def set_interpretation(self, sector: str, label: str, content: Dict[str, Any],
@@ -307,6 +409,26 @@ class Database:
 
     # ---------- 状态 ----------
 
+    def indicator_freshness(self, now: Optional[datetime] = None) -> Dict[str, Dict[str, Any]]:
+        """每个指标最新数据期与距今月数（新数据未入库的指标不会出现）。"""
+        value = now or datetime.now()
+        current = value.year * 12 + value.month
+        rows = self.con.execute(
+            "SELECT indicator_id, MAX(period) p FROM observations GROUP BY indicator_id",
+        ).fetchall()
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            period = str(row["p"])
+            try:
+                year, month = int(period[:4]), int(period[5:7])
+            except ValueError:
+                continue
+            result[str(row["indicator_id"])] = {
+                "latest_period": period,
+                "months_behind": current - (year * 12 + month),
+            }
+        return result
+
     def status(self) -> Dict[str, Any]:
         used = self.llm_usage_this_month()
         budget = int(self.get_setting("monthly_token_budget", "0") or 0)
@@ -319,4 +441,5 @@ class Database:
             "llm_budget_remaining": max(0, budget - used) if budget else None,
             "last_fetch_month": self.get_setting("last_fetch_month", ""),
             "last_sync": dict(last_sync) if last_sync else None,
+            "data_warnings": self.warning_count(),
         }

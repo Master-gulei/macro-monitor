@@ -1,7 +1,8 @@
 {
   "site": {
     "name": "宏观经济主要指标月度看板",
-    "chart_months": 24
+    "chart_months": 24,
+    "keep_reports": 6
   },
   "safety": {
     "minimum_request_interval_seconds": 3,
@@ -47,6 +48,9 @@
   "llm": {
     "provider": "deepseek",
     "base_url": "https://api.deepseek.com",
+    "allowed_hosts": [
+      "api.deepseek.com"
+    ],
     "model": "deepseek-flash",
     "api_key_env": "DEEPSEEK_API_KEY",
     "api_key": "",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 
 class ConfigError(ValueError):
@@ -43,6 +44,15 @@ def load_config(project: Path) -> Dict[str, Any]:
     base_url = str(llm.get("base_url", ""))
     if base_url and not base_url.startswith("https://"):
         raise ConfigError("llm.base_url 必须是 https 地址")
+    # LLM 请求不经 SafeFetcher（无抓取白名单保护），单独校验主机白名单，
+    # 防止 config 被篡改后把 API Key 发往任意地址。
+    llm_hosts = {str(host).strip() for host in (llm.get("allowed_hosts") or []) if str(host).strip()}
+    if base_url:
+        if not llm_hosts:
+            raise ConfigError("llm.allowed_hosts 必须至少包含 base_url 的主机名")
+        host = (urlparse(base_url).hostname or "").lower()
+        if host not in {item.lower() for item in llm_hosts}:
+            raise ConfigError("llm.base_url 主机不在 llm.allowed_hosts 白名单内：{}".format(host))
     if _config_int(llm, "monthly_token_budget", 0, "llm.monthly_token_budget") <= 0:
         raise ConfigError("monthly_token_budget 必须大于 0")
     return data
