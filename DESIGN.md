@@ -53,12 +53,12 @@
 | 模块 | 职责 |
 |---|---|
 | `config.py` | config.json + local_config.json 浅合并覆盖、路径解析、安全白名单与 LLM base_url 主机校验 |
-| `db.py` | SQLite schema、观测批写入（批内去重）upsert/series、解读、settings、请求审计、LLM 用量、sync_runs、data_warnings 告警表、SQLite 在线备份 |
+| `db.py` | SQLite schema、观测批写入（批内去重）upsert/series、解读、settings、请求审计、LLM 用量、sync_runs、data_warnings 告警表、SQLite 在线备份、审计清理（prune_audit） |
 | `fetch.py` | SafeFetcher：host 白名单、月度请求预算、最小间隔、跨进程锁、TLS 例外、审计 |
 | `indicators.py` | 指标注册表、70 城分线名单、kind 元数据/单位、发布规则、红绿灯规则、入库合理性校验区间（SANE_RANGES/前缀规则） |
 | `sources/nbs.py` | easyquery：GetTree 按名称关键词自动发现指标代码并缓存；QueryData 带浏览器 UA/Accept 头 |
 | `sources/__init__.py` | `HtmlSource` 基类：统一 `_fetch_html`（purpose、HTML Accept、可选 404） |
-| `sources/html_parser.py` | 通用 HTML 表格解析（parse_html） |
+| `sources/html_parser.py` | 通用 HTML 表格解析（parse_html，未闭合 script/style 剔除后恢复重解析） |
 | `sources/statsweb_patterns.py` | 统计局新闻稿链接/标题正则与行名归一化（叶子模块，各 Mixin 共用） |
 | `sources/statsweb.py` | 官网新闻稿入口：列表页/经济运行稿列表定位最新发布链接；组合下列 Mixin 并重导出 patterns/parse_html 以兼容既有引用 |
 | `sources/statsweb_house.py` | HouseMixin：70 城新建/二手左右双栏表 + 分面积段全国均值聚合 |
@@ -69,7 +69,7 @@
 | `sources/eastmoney.py` | datacenter-web 通用封装：reportName/字段从注册表注入，dict/list 两种字段写法 |
 | `sources/customs.py` | 快讯列表定位最新"全国进出口总值表"解析 HTML；外贸指数页按月列表格解析 |
 | `sources/mohrss.py` | 人社部官网：首页定位季度新闻发布会实录链接，解析城镇新增就业（累计） |
-| `ai.py` | OpenAI 兼容客户端（默认 DeepSeek，thinking 关闭），JSON 解析失败自动重试一次，月度预算，单次响应体 10 MB 上限，鉴权错误与瞬时错误分类处理 |
+| `ai.py` | OpenAI 兼容客户端（默认 DeepSeek，thinking 关闭），JSON 用 raw_decode 提取首个合法对象（容忍尾部垃圾），解析失败自动重试一次，月度预算，单次响应体 10 MB 上限，鉴权错误与瞬时错误分类处理 |
 | `pipeline.py` | 流水线：抓取（指标级容错 + 入库前合理性校验）→ 70 城聚合 → AI 解读（7 板块+综合，连续失败熔断）→ 看板（生成失败隔离）；抓取成功后自动备份 DB；每次生成后按 keep_reports 清理旧看板；每月幂等；缺失指标自带 missing_note 写入板块素材注明 |
 | `report.py` | 单文件 HTML 渲染：红绿灯（信号依据含较上期升/降方向与幅度）、AI 卡片、ECharts 图表（SRI 完整性校验 + 备用 CDN，含表格降级）、70 城专项、数据日历（含较上期列）、数据源附录、告警横幅与缺数高亮；黑底暗色主题、多层阴影立体表格、全屏铺满布局 |
 
@@ -115,6 +115,7 @@ run --force --refresh-ai
 - **数据合理性校验**：每行入库前按指标口径校验合理区间（SANE_RANGES/前缀规则），越界照常入库但写入 data_warnings
 - **看板脚本安全**：ECharts 附 sha384 SRI 完整性校验，CDN 不可用切换 unpkg 备用，均不可用降级表格
 - **数据库备份**：抓取到新数据后自动快照 `data/macro.db.bak`（SQLite 在线备份 API，WAL 安全）
+- **审计清理**：`run.bat prune` 清理过期审计/告警/用量/同步记录（默认保留 90 天），观察数据与 AI 解读不动
 - **看板保留**：`out/` 仅保留最近 `site.keep_reports` 份看板
 - **失败隔离**：看板生成失败不影响抓取/解读结果
 - **幂等**：抓取/解读按月去重，观测按主键覆盖更新；重复运行安全

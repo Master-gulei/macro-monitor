@@ -60,13 +60,23 @@ def _clean_text(value: Any, limit: int) -> str:
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
-    match = re.search(r"\{.*\}", text.strip(), re.S)
-    if not match:
-        raise LLMCallFailed("模型响应中没有 JSON")
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        raise LLMCallFailed("模型响应 JSON 解析失败")
+    """从模型输出中提取首个合法 JSON 对象，容忍前后缀垃圾与嵌套花括号。
+
+    贪婪正则匹配到最后一个 `}`，模型输出尾部带垃圾时直接失败；
+    raw_decode 从第一个 `{` 开始逐步尝试，能精确切出第一个完整对象。
+    """
+    text = str(text).strip()
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise LLMCallFailed("模型响应中没有 JSON")
 
 
 class LLMClient:

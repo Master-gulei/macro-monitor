@@ -74,6 +74,15 @@ class _ContentParser(HTMLParser):
 
 
 def parse_html(body: bytes) -> _ContentParser:
+    text = body.decode("utf-8", errors="replace")
     parser = _ContentParser()
-    parser.feed(body.decode("utf-8", errors="replace"))
+    parser.feed(text)
+    if parser._skip_depth:
+        # HTMLParser 对 script/style 启用 CDATA 模式：只找对应的闭合标签，未闭合时
+        # 其后所有内容（含链接与表格标签）都不会再触发任何回调，静默丢失。
+        # 此时剔除 script/style 标签后重解析，让后续内容重新可见。
+        cleaned = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1\s*>", "", text)
+        cleaned = re.sub(r"(?is)<(script|style)\b[^>]*>", "", cleaned)
+        parser = _ContentParser()
+        parser.feed(cleaned)
     return parser

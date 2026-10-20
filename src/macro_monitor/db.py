@@ -383,6 +383,26 @@ class Database:
             backup_con.close()
         return target
 
+    # ---------- 审计清理 ----------
+
+    def prune_audit(self, retention_days: int = 90) -> Dict[str, int]:
+        """清理超过保留期的审计/告警/用量/同步记录（默认 90 天），防止无限增长。
+
+        只清理审计与告警类记录，观察数据与 AI 解读不动。
+        """
+        days = max(1, int(retention_days))
+        cutoff = int(time.time()) - days * 86400
+        pruned: Dict[str, int] = {}
+        for table, column in (("network_requests", "requested_at"),
+                              ("provider_usage", "created_at"),
+                              ("sync_runs", "started_at"),
+                              ("data_warnings", "created_at")):
+            cur = self.con.execute(
+                "DELETE FROM {} WHERE {}<?".format(table, column), (cutoff,))
+            pruned[table] = cur.rowcount
+        self.con.commit()
+        return pruned
+
     # ---------- AI 解读 ----------
 
     def set_interpretation(self, sector: str, label: str, content: Dict[str, Any],

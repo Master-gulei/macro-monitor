@@ -60,6 +60,8 @@ def main() -> None:
                             help="用库内数据重新生成 AI 解读")
     commands.add_parser("status", help="查看数据量、LLM 预算用量与最近同步")
     commands.add_parser("reset-budget", help="手动重置本月 LLM token 预算计数")
+    prune_cmd = commands.add_parser("prune", help="清理过期的审计/告警/用量/同步记录（默认保留 90 天）")
+    prune_cmd.add_argument("--days", type=int, default=90, help="保留天数（默认 90，最小 1）")
     args = parser.parse_args()
 
     project = args.project.expanduser().resolve()
@@ -101,6 +103,10 @@ def main() -> None:
             elif args.command == "reset-budget":
                 output({"ok": True, "budget_month": db.reset_budget_month(),
                         "llm_tokens_this_month": db.llm_usage_this_month()})
+            elif args.command == "prune":
+                days = max(1, int(args.days))
+                output({"ok": True, "retention_days": days,
+                        "pruned": db.prune_audit(days)})
         finally:
             db.close()
     except ConfigError as exc:
