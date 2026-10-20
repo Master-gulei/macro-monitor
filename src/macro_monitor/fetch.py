@@ -90,6 +90,21 @@ _JSON_PURPOSES = ("nbs_tree", "nbs_query", "eastmoney_query")
 _HTML_PURPOSES = ("stats_page", "customs_page", "mohrss_page")
 
 
+def _norm_host(value: str) -> str:
+    """主机名归一化：小写、去空格与尾点，Unicode 域名转 punycode。
+
+    与 urlparse 的 hostname 对齐比较；无法归一化（如含端口的配置项）返回空串，
+    永不命中白名单 → 拒绝（fail-closed）。
+    """
+    host = str(value).strip().lower().rstrip(".")
+    if not host or ":" in host:
+        return ""
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+
+
 class SafeFetcher:
     """白名单、月度请求预算、间隔、跨进程锁与审计。
 
@@ -106,7 +121,18 @@ class SafeFetcher:
         self._openers = (verified, insecure)
         self.sleeper = sleeper
         safety = config.get("safety") or {}
-        self.tls_exceptions = set(safety.get("tls_verify_exceptions") or [])
+        self.tls_exceptions = {
+            _norm_host(host)
+            for host in (safety.get("tls_verify_exceptions") or [])
+            if _norm_host(host)
+        }
+        # 白名单归一化（小写/尾点/IDN）：urlparse 会把主机名小写，配置项大小写、
+        # 空格、尾点或 Unicode 域名写法不一致时也能正确命中；归一化失败者永不命中（fail-closed）。
+        self.allowed_hosts = {
+            _norm_host(host)
+            for host in (safety.get("allowed_hosts") or [])
+            if _norm_host(host)
+        }
 
     @property
     def opener(self) -> Any:
@@ -119,7 +145,8 @@ class SafeFetcher:
             raise ValueError("mode 必须是 automatic 或 user")
         parsed = urlparse(url)
         safety = self.config["safety"]
-        if parsed.scheme != "https" or parsed.hostname not in set(safety["allowed_hosts"]):
+        host = _norm_host(parsed.hostname or "")
+        if parsed.scheme != "https" or host not in self.allowed_hosts:
             raise ValueError("拒绝访问未授权地址：{}".format(url))
         with file_lock(self.lock_path):
             budget_key = "automatic_requests_per_month" if mode == "automatic" else "user_requests_per_month"
@@ -129,12 +156,12 @@ class SafeFetcher:
             wait = self.db.last_request_time() + interval - int(time.time())
             if wait > 0:
                 self.sleeper(wait)
-            request_id = self.db.start_request(mode, purpose, parsed.hostname or "")
+            request_id = self.db.start_request(mode, purpose, host)
             request = urllib.request.Request(url, headers={
                 "User-Agent": "macro-monitor/0.1 (personal macro dashboard)",
                 "Accept": accept,
             })
-            opener = self._openers[1] if parsed.hostname in self.tls_exceptions else self._openers[0]
+            opener = self._openers[1] if host in self.tls_exceptions else self._openers[0]
             try:
                 with opener(request, timeout=45) as response:
                     status = int(getattr(response, "status", 200))

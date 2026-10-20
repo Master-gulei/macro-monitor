@@ -25,6 +25,8 @@ def load_config(project: Path) -> Dict[str, Any]:
     local_path = project / "local_config.json"
     if local_path.exists():
         local = json.loads(local_path.read_text(encoding="utf-8"))
+        if not isinstance(local, dict):
+            raise ConfigError("local_config.json 必须是 JSON 对象（不能是数组或标量）")
         for key, value in (local or {}).items():
             if isinstance(value, dict) and isinstance(data.get(key), dict):
                 data[key] = {**data[key], **value}
