@@ -1,7 +1,6 @@
 {
   "site": {
     "name": "宏观经济主要指标月度看板",
-    "history_months": 24,
     "chart_months": 24
   },
   "safety": {
@@ -56,7 +55,6 @@
     "monthly_token_budget": 200000
   },
   "pipeline": {
-    "interpret_min_months": 3,
     "light_threshold_note": "红绿灯阈值为经验性设定，仅作视觉提示，以 AI 解读为准"
   }
 }

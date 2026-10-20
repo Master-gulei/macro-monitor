@@ -29,12 +29,14 @@ class MohrssSource:
         return self.fetcher.fetch(url, mode="automatic", purpose="mohrss_page",
                                   accept="text/html,application/xhtml+xml")
 
-    @staticmethod
-    def _find_press_url(parser: Any) -> Any:
-        """在页面链接中找第一个季度新闻发布会链接，返回 (绝对 URL, 链接文本)。"""
+    def _find_press_url(self, parser: Any) -> Any:
+        """在页面链接中找第一个季度新闻发布会链接，返回 (绝对 URL, 链接文本)。
+
+        相对链接基于配置的 base_url 拼装，镜像部署时同样生效。
+        """
         for href, text in parser.links:
             if "新闻发布" in text and _QUARTER_WORDS.search(text):
-                return urllib.parse.urljoin("https://www.mohrss.gov.cn/", href), text
+                return urllib.parse.urljoin(self.base + "/", href), text
         return None, None
 
     @staticmethod

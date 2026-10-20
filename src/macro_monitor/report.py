@@ -281,6 +281,9 @@ def _series(db: Database, indicator_id: str, kind: str, name: str,
 
 def _chart_specs(db: Database, config: Dict[str, Any]) -> List[Dict[str, Any]]:
     months = int(config.get("site", {}).get("chart_months", 24))
+    # 进出口单位跟随库内最新值的存储单位（亿元/亿美元），不硬编码
+    trade_main = db.latest("trade_total", "value") or {}
+    trade_unit = str(trade_main.get("unit") or "亿美元")
 
     def take(series: Dict[str, Any]) -> Dict[str, Any]:
         return {**series, "points": series["points"][-months:]}
@@ -310,7 +313,8 @@ def _chart_specs(db: Database, config: Dict[str, Any]) -> List[Dict[str, Any]]:
          "series": [take(_series(db, "ind_va", "yoy", "工业增加值同比", color=_PALETTE[0])),
                     take(_series(db, "ind_profit", "accum_yoy", "工业企业利润累计同比",
                                  color=_PALETTE[1]))]},
-        {"id": "chart-trade", "title": "进出口总值（亿美元）", "unit0": "亿美元",
+        {"id": "chart-trade", "title": "进出口总值（{}）".format(trade_unit),
+         "unit0": trade_unit,
          "series": [take(_series(db, "trade_total", "value", "进出口总值", color=_PALETTE[0])),
                     take(_series(db, "trade_total", "export", "出口", color=_PALETTE[2])),
                     take(_series(db, "trade_total", "import", "进口", color=_PALETTE[1]))]},
@@ -380,7 +384,7 @@ def _calendar_rows(db: Database) -> List[Dict[str, Any]]:
         elif spec["id"] == "trade_total":
             main = latest.get("value") or {}
             export_yoy = latest.get("export_yoy") or {}
-            value_text = fmt_value(main.get("value"), "亿美元")
+            value_text = fmt_value(main.get("value"), main.get("unit") or "亿美元")
             if export_yoy:
                 value_text += "，出口同比 {}%".format(export_yoy["value"])
         else:

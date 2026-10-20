@@ -30,12 +30,20 @@ OVERALL_SYSTEM = """你是严谨、克制的中文宏观经济分析师。你会
 {"headline":"一句话总体判断（不超过40字）","stance":"当前经济景气的整体定位（不超过60字）","signals":["3到5条组合信号"],"risks":["0到3条风险提示；没有就给空数组"],"outlook":"一句话前瞻（不超过60字，不涉及具体数值预测）"}
 禁止在 JSON 字符串内使用英文双引号。"""
 
+# 瞬时错误（429/5xx/网络中断）重试一次的退避秒数
+_RETRY_BACKOFF_SECONDS = 2.0
+
 
 class LLMUnavailable(RuntimeError):
     pass
 
 
 class LLMCallFailed(RuntimeError):
+    pass
+
+
+class LLMAuthError(RuntimeError):
+    """鉴权类确定性失败（HTTP 401/403）：重试无效，应熔断整个解读步骤。"""
     pass
 
 
@@ -52,7 +60,10 @@ def _extract_json(text: str) -> Dict[str, Any]:
     match = re.search(r"\{.*\}", text.strip(), re.S)
     if not match:
         raise LLMCallFailed("模型响应中没有 JSON")
-    return json.loads(match.group(0))
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        raise LLMCallFailed("模型响应 JSON 解析失败")
 
 
 class LLMClient:
@@ -73,7 +84,6 @@ class LLMClient:
         self.timeout = int(llm.get("timeout_seconds", 600))
         self.thinking_disabled = bool(llm.get("thinking_disabled", True))
         self.budget = int(llm.get("monthly_token_budget", 200000))
-        self.failure_cooldown_seconds = 300
 
     def _check_budget(self) -> None:
         used = self.db.llm_usage_this_month()
@@ -114,17 +124,40 @@ class LLMClient:
                 "User-Agent": "macro-monitor/0.1",
             },
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                value = json.loads(response.read().decode("utf-8", errors="replace"))
-        except urllib.error.HTTPError as exc:
-            message = "HTTP {}: {}".format(exc.code, exc.read().decode("utf-8", errors="replace")[:300])
-            self.db.record_llm_result("default", task_type, 0, False, message)
-            raise LLMCallFailed(message)
-        except urllib.error.URLError as exc:
-            message = "网络错误：{}".format(exc.reason)
-            self.db.record_llm_result("default", task_type, 0, False, message)
-            raise LLMCallFailed(message)
+        attempt = 0
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    value = json.loads(response.read().decode("utf-8", errors="replace"))
+                break
+            except urllib.error.HTTPError as exc:
+                message = "HTTP {}: {}".format(
+                    exc.code, exc.read().decode("utf-8", errors="replace")[:300])
+                if exc.code in (401, 403):
+                    # 鉴权失败是确定性错误：重试无效，抛 LLMAuthError 供上层熔断
+                    self.db.record_llm_result("default", task_type, 0, False, message)
+                    raise LLMAuthError(message)
+                if (exc.code == 429 or exc.code >= 500) and attempt < 1:
+                    # 瞬时错误：重试一次并退避
+                    attempt += 1
+                    self.db.record_llm_result("default", task_type, 0, False, message)
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self.db.record_llm_result("default", task_type, 0, False, message)
+                raise LLMCallFailed(message)
+            except urllib.error.URLError as exc:
+                message = "网络错误：{}".format(exc.reason)
+                if attempt < 1:
+                    attempt += 1
+                    self.db.record_llm_result("default", task_type, 0, False, message)
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self.db.record_llm_result("default", task_type, 0, False, message)
+                raise LLMCallFailed(message)
+            except json.JSONDecodeError as exc:
+                message = "响应不是合法 JSON：{}".format(exc)[:300]
+                self.db.record_llm_result("default", task_type, 0, False, message)
+                raise LLMCallFailed(message)
         output = str(value.get("choices", [{}])[0].get("message", {}).get("content", ""))
         if not output:
             message = "模型返回了空内容"
@@ -156,7 +189,7 @@ class LLMClient:
     # ---------- 业务方法 ----------
 
     def _chat_json(self, system: str, prompt: str, task_type: str) -> Dict[str, Any]:
-        """调用 chat 并解析 JSON；模型偶发返回非 JSON 时重试一次。"""
+        """调用 chat 并解析 JSON；模型偶发返回非 JSON/畸形 JSON 时重试一次。"""
         output = self.chat(system, prompt, task_type)
         try:
             return _extract_json(output)

@@ -10,8 +10,9 @@ from .statsweb import parse_html
 
 # 海关总署官网：统计快讯（进出口总值表）与外贸指数（出口价格指数）
 # 注意：部分网络环境无法访问海关官网（超时/风控），此时该源失败并由流水线降级。
+# 取美元值口径（亿美元）：与东方财富兜底源单位一致，避免同一序列混入两种币种。
 
-KUIXUN_LINK_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月全国进出口总值表（人民币值）")
+KUIXUN_LINK_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月全国进出口总值表（美元值）")
 TRADE_INDEX_LINK_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月中国外贸指数")
 
 
@@ -65,7 +66,7 @@ class CustomsSource:
                     continue
                 kind = row_names[name]
                 rows.append({"period": "", "kind": kind, "city": "",
-                             "value": value, "unit": "亿元"})
+                             "value": value, "unit": "亿美元"})
                 if kind == "value" and len(cells) >= 3:
                     try:
                         yoy = float(cells[2].replace(",", "").replace("%", ""))
@@ -78,7 +79,7 @@ class CustomsSource:
         match = KUIXUN_LINK_PATTERN.search(text or "")
         period = "{}-{:0>2}".format(match.group(1), int(match.group(2))) if match else ""
         return {"rows": rows,
-                "source_label": "海关总署官网·统计快讯（人民币值）",
+                "source_label": "海关总署官网·统计快讯（美元值）",
                 "period": period}
 
     # ---------- 外贸指数（出口价格指数） ----------

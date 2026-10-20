@@ -205,7 +205,17 @@ class Database:
         return int(time.mktime(month_start.timetuple()))
 
     def reset_budget_month(self) -> str:
+        """重置本月 LLM 用量计数：删除本月 provider_usage 记录，历史月份保留。
+
+        用量统计（llm_usage_this_month）按时间戳计算，仅改设置值无法清零，
+        必须删除本月记录才能真正重置。
+        """
         value = self.current_month_key()
+        self.con.execute(
+            "DELETE FROM provider_usage WHERE created_at>=?",
+            (self.budget_month_start(),),
+        )
+        self.con.commit()
         self.set_setting("budget_month", value)
         return value
 

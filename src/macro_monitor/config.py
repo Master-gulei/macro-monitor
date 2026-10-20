@@ -53,10 +53,9 @@ def project_paths(project: Path) -> Dict[str, Path]:
     paths = {
         "project": project,
         "data": project / "data",
-        "cache": project / "data" / "cache",
         "database": project / "data" / "macro.db",
         "out": project / "out",
     }
-    for key in ("data", "cache", "out"):
+    for key in ("data", "out"):
         paths[key].mkdir(parents=True, exist_ok=True)
     return paths

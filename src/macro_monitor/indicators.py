@@ -241,6 +241,10 @@ KIND_UNIT: Dict[str, str] = {
     "lab_hours": "小时",
     "export_accum": "亿美元",
     "import_accum": "亿美元",
+    "export_mom": "%",
+    "import_mom": "%",
+    "export_accum_yoy": "%",
+    "import_accum_yoy": "%",
     "pmi_emp_manuf": "%",
     "npm_emp": "%",
 }
@@ -358,7 +362,9 @@ INDICATORS: List[Dict[str, Any]] = [
             {"type": "eastmoney", "report_name": "RPT_ECONOMY_CPI",
              "fields": [
                  {"kind": "yoy", "field": "NATIONAL_SAME"},
-                 {"kind": "mom", "field": "NATIONAL_BASE", "transform": "minus100"},
+                 # NATIONAL_BASE 是「上年同月=100」同比指数而非「上月=100」，
+                 # 环比涨幅直接用 NATIONAL_SEQUENTIAL（已是百分数，无需 transform）
+                 {"kind": "mom", "field": "NATIONAL_SEQUENTIAL"},
              ]},
         ],
         # 分类细项：八大类与食品细项（统计局官网 CPI 月度报告表格）
@@ -614,14 +620,24 @@ def light_for(indicator_id: str, kind: str, value: Optional[float]) -> Optional[
 
 
 def next_release_date(latest_period: str, release_key: str) -> str:
-    """最新数据期之后的下一次发布日（即次月数据的例行发布日）。"""
+    """下一期数据的预计发布日。
+
+    口径：PMI 当月发布（下期=次月数据、发布于当月末）；其余月度指标次月发布
+    （下期=次月数据，发布于再下月的例行日）；季度指标（quarter_press）下期=下一
+    季度数据，发布于季后次月 27 日左右。
+    """
     rule = RELEASE_RULES.get(release_key, {})
     day = rule.get("day")
     year, month = int(latest_period[:4]), int(latest_period[5:7])
-    if month == 12:
-        year, month = year + 1, 1
+    if release_key == "quarter_press":
+        month += 4  # 下期数据期=下一季度末，发布日=季后次月 27
+        day = 27
+    elif day is None:
+        month += 1  # month_end：下期=次月数据，当月月末发布
     else:
-        month += 1
+        month += 2  # 次月发布的月度指标：下期=次月数据，再下月例行日发布
+    year += (month - 1) // 12
+    month = (month - 1) % 12 + 1
     if day is None:
         day = calendar.monthrange(year, month)[1]
     return "{:04d}-{:02d}-{:02d}".format(year, month, day)

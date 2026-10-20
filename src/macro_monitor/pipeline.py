@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import indicators
-from .ai import BudgetExceeded, LLMClient, LLMUnavailable
+from .ai import BudgetExceeded, LLMAuthError, LLMClient, LLMUnavailable
 from .db import Database
 from .fetch import SafeFetcher
 from .report import build_report as build_report_html
@@ -163,53 +163,59 @@ class MonthlyPipeline:
         else:
             status, error = "partial", ""
         self.db.finish_sync(run_id, status, fetched, inserted, error)
-        self.db.set_setting("last_fetch_month", month_key)
+        # 仅在实际拿到数据时写月度标记：全失败（fetched==0）不写，
+        # 否则下次运行会被静默跳过，掩盖整月无数据的事实。
+        if fetched > 0:
+            self.db.set_setting("last_fetch_month", month_key)
         return {"status": status, "fetched": fetched, "inserted": inserted,
                 "updated": updated, "indicators": results}
 
     # ---------- 步骤 2：70 城房价聚合 ----------
 
     def aggregate_house(self) -> int:
-        """把 70 城明细预聚合为上涨城市数与各线城市均值，供 AI 与看板直接使用。
+        """把 70 城明细按数据期预聚合为上涨城市数与各线城市均值，供 AI 与看板直接使用。
 
+        对库内所有存在明细的数据期逐期聚合（幂等覆盖），补齐历史趋势。
         返回本次新插入的聚合观测数（幂等：已存在的行是覆盖更新，不计入）。
         """
         inserted = 0
-        period = self.db.latest_period("house_70")
-        if not period:
+        rows = self.db.series("house_70", city=None)
+        periods = sorted({str(row["period"]) for row in rows if row["city"]})
+        if not periods:
             return inserted
-        by_city: Dict[str, Dict[str, float]] = {}
-        for row in self.db.series("house_70", city=None):
-            if row["period"] != period or not row["city"]:
-                continue
-            if row["kind"] not in ("city_mom", "city_yoy",
-                                   "city_mom_2nd", "city_yoy_2nd"):
-                continue
-            by_city.setdefault(str(row["city"]), {})[str(row["kind"])] = float(row["value"])
-        if not by_city:
-            return inserted
-        for kind, key in (("rise_count_mom", "city_mom"),
-                          ("rise_count_yoy", "city_yoy")):
-            count = sum(1 for values in by_city.values()
-                        if values.get(key) is not None and values[key] > 100)
-            event = self.db.upsert_observation(
-                "house_70", period, kind, float(count), "聚合计算",
-                unit=indicators.KIND_UNIT[kind])
-            inserted += int(event == "inserted")
-        for tier_key in ("tier1", "tier2", "tier3"):
-            tier_cities = set(indicators.CITY_TIERS[{"tier1": "一线",
-                                                     "tier2": "二线",
-                                                     "tier3": "三线"}[tier_key]])
-            for base, city_kind in (("mom", "city_mom"), ("yoy", "city_yoy")):
-                values = [by_city[city][city_kind] for city in by_city
-                          if city in tier_cities and by_city[city].get(city_kind) is not None]
-                if not values:
+        for period in periods:
+            by_city: Dict[str, Dict[str, float]] = {}
+            for row in rows:
+                if row["period"] != period or not row["city"]:
                     continue
-                kind = "{}_{}".format(tier_key, base)
+                if row["kind"] not in ("city_mom", "city_yoy",
+                                       "city_mom_2nd", "city_yoy_2nd"):
+                    continue
+                by_city.setdefault(str(row["city"]), {})[str(row["kind"])] = float(row["value"])
+            if not by_city:
+                continue
+            for kind, key in (("rise_count_mom", "city_mom"),
+                              ("rise_count_yoy", "city_yoy")):
+                count = sum(1 for values in by_city.values()
+                            if values.get(key) is not None and values[key] > 100)
                 event = self.db.upsert_observation(
-                    "house_70", period, kind, round(sum(values) / len(values), 2),
-                    "聚合计算", unit=indicators.KIND_UNIT[kind])
+                    "house_70", period, kind, float(count), "聚合计算",
+                    unit=indicators.KIND_UNIT[kind])
                 inserted += int(event == "inserted")
+            for tier_key in ("tier1", "tier2", "tier3"):
+                tier_cities = set(indicators.CITY_TIERS[{"tier1": "一线",
+                                                         "tier2": "二线",
+                                                         "tier3": "三线"}[tier_key]])
+                for base, city_kind in (("mom", "city_mom"), ("yoy", "city_yoy")):
+                    values = [by_city[city][city_kind] for city in by_city
+                              if city in tier_cities and by_city[city].get(city_kind) is not None]
+                    if not values:
+                        continue
+                    kind = "{}_{}".format(tier_key, base)
+                    event = self.db.upsert_observation(
+                        "house_70", period, kind, round(sum(values) / len(values), 2),
+                        "聚合计算", unit=indicators.KIND_UNIT[kind])
+                    inserted += int(event == "inserted")
         return inserted
 
     # ---------- 步骤 3：AI 解读素材 ----------
@@ -312,7 +318,7 @@ class MonthlyPipeline:
                 results[sector_id] = {"status": "ok", "model": content.get("model", "")}
                 headlines.append("【{}】{}".format(sector["name"],
                                                    content.get("headline", "")))
-            except (LLMUnavailable, BudgetExceeded) as exc:
+            except (LLMUnavailable, BudgetExceeded, LLMAuthError) as exc:
                 results[sector_id] = {"status": "failed", "error": str(exc)}
                 stop = True
             except Exception as exc:
@@ -325,13 +331,16 @@ class MonthlyPipeline:
                 self.db.set_interpretation(
                     "overall", "latest", content, content.get("model", ""))
                 overall = {"status": "ok", "model": content.get("model", "")}
-            except (LLMUnavailable, BudgetExceeded) as exc:
+            except (LLMUnavailable, BudgetExceeded, LLMAuthError) as exc:
                 overall = {"status": "failed", "error": str(exc)}
             except Exception as exc:
                 overall = {"status": "failed",
                            "error": "{}: {}".format(type(exc).__name__, exc)}
-        self.db.set_setting("last_interpret_month", month_key)
+        # 仅在有板块成功解读时写月度标记：全部失败（如缺 key/坏 key/无数据）不写，
+        # 否则修好配置后的下一次运行会被静默跳过。
         ok_count = sum(1 for value in results.values() if value.get("status") == "ok")
+        if ok_count > 0:
+            self.db.set_setting("last_interpret_month", month_key)
         if ok_count == 0:
             status = "failed"
         elif ok_count == len(indicators.SECTORS) and overall.get("status") == "ok":

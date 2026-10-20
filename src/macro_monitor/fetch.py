@@ -87,7 +87,7 @@ def _default_openers():
 
 # purpose -> 期望的内容类型（异常类型会触发 FetchFailed，由上层切换兜底源）
 _JSON_PURPOSES = ("nbs_tree", "nbs_query", "eastmoney_query")
-_HTML_PURPOSES = ("stats_page", "customs_page")
+_HTML_PURPOSES = ("stats_page", "customs_page", "mohrss_page")
 
 
 class SafeFetcher:
@@ -139,9 +139,10 @@ class SafeFetcher:
                 with opener(request, timeout=45) as response:
                     status = int(getattr(response, "status", 200))
                     content_type = response.headers.get("Content-Type", "").lower()
-                    body = response.read()
+                    # 限制单次读取字节数：先限量读再判断，避免超大响应先完整入内存
+                    body = response.read(MAX_BODY_BYTES + 1)
                     if len(body or b"") > MAX_BODY_BYTES:
-                        message = "响应体过大（{:,} 字节），已拒绝".format(len(body))
+                        message = "响应体过大（>{:,} 字节），已拒绝".format(MAX_BODY_BYTES)
                         self.db.finish_request(request_id, "failed", status, message)
                         raise FetchFailed(message)
                     if purpose in _JSON_PURPOSES and not (
